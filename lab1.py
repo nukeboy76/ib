@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
 from dataclasses import asdict, dataclass
+import binascii
 import hashlib
 import json
 import os
 import sys
-import binascii
 from hashlib import pbkdf2_hmac
+
 from Crypto.Cipher import AES
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPushButton, QStatusBar, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget
+    QAction,
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 DB_PATH = os.path.expanduser("~/.infbez_db.bin")
 DB_ENV_KEY = os.environ.get("INFBEZ_DB_KEY", "infbez_secret_key")
 AUTHOR_TEXT = "Автор: Чеченев Александр ИДБ-22-10\nИндивидуальное задание: 27 — Несовпадение с именем пользователя, записанным в обратном порядке."
 
+PBKDF2_ITERS = 200000
+
+
 def _pad(b: bytes) -> bytes:
     pad_len = 16 - (len(b) % 16)
     return b + bytes([pad_len]) * pad_len
+
 
 def _unpad(b: bytes) -> bytes:
     if not b:
@@ -30,11 +46,13 @@ def _unpad(b: bytes) -> bytes:
         raise ValueError("Invalid padding")
     return b[:-pad]
 
+
 def encrypt_bytes(plain: bytes, password: str) -> bytes:
     key = hashlib.sha256(password.encode()).digest()
     iv = bytes(16)
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return cipher.encrypt(_pad(plain))
+
 
 def decrypt_bytes(data: bytes, password: str) -> bytes:
     key = hashlib.sha256(password.encode()).digest()
@@ -43,20 +61,21 @@ def decrypt_bytes(data: bytes, password: str) -> bytes:
     dec = cipher.decrypt(data)
     return _unpad(dec)
 
-PBKDF2_ITERS = 200000
 
 def make_password_hash(plain: str, iterations: int = PBKDF2_ITERS):
     salt = os.urandom(16)
-    dk = pbkdf2_hmac('sha256', plain.encode('utf-8'), salt, iterations)
+    dk = pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, iterations)
     return binascii.hexlify(dk).decode(), binascii.hexlify(salt).decode(), iterations
+
 
 def verify_password_hash(stored_hash_hex: str, salt_hex: str, iterations: int, candidate: str):
     try:
         salt = binascii.unhexlify(salt_hex)
-        dk = pbkdf2_hmac('sha256', candidate.encode('utf-8'), salt, iterations)
+        dk = pbkdf2_hmac("sha256", candidate.encode("utf-8"), salt, iterations)
         return binascii.hexlify(dk).decode() == stored_hash_hex
     except Exception:
         return False
+
 
 @dataclass
 class User:
@@ -66,18 +85,30 @@ class User:
     iterations: int = PBKDF2_ITERS
     restrict: bool = False
     banned: bool = False
-    firstEntry: bool = True
+    force_change: bool = False
+
 
 class Database:
     def __init__(self, path: str = DB_PATH, db_key: str = DB_ENV_KEY):
         self.path = path
         self.db_key = db_key
         if not os.path.exists(path):
-            self.admin = User("ADMIN", password_hash="", salt="", iterations=PBKDF2_ITERS, restrict=False, banned=False, firstEntry=True)
+            self.admin = User("ADMIN", password_hash="", salt="", iterations=PBKDF2_ITERS, restrict=False, banned=False)
             self.users = []
             self._save()
         else:
             self._load()
+
+    def _sanitize_user_dict(self, d: dict) -> dict:
+        out = {}
+        out["login"] = d.get("login", "")
+        out["password_hash"] = d.get("password_hash", d.get("password", ""))
+        out["salt"] = d.get("salt", "")
+        out["iterations"] = d.get("iterations", PBKDF2_ITERS)
+        out["restrict"] = d.get("restrict", False)
+        out["banned"] = d.get("banned", False)
+        out["force_change"] = d.get("force_change", False)
+        return out
 
     def _save(self):
         obj = {"admin": asdict(self.admin), "users": [asdict(u) for u in self.users]}
@@ -96,8 +127,12 @@ class Database:
             sys.exit(1)
         obj = json.loads(plain.decode("utf-8"))
         a = obj.get("admin", {})
+        a = self._sanitize_user_dict(a)
         self.admin = User(**a)
-        self.users = [User(**u) for u in obj.get("users", [])]
+        self.users = []
+        for u in obj.get("users", []):
+            su = self._sanitize_user_dict(u)
+            self.users.append(User(**su))
 
     def save(self):
         self._save()
@@ -121,13 +156,14 @@ class Database:
         self.users = [u for u in self.users if u.login != login]
         self._save()
 
+
 class LoginDialog(QDialog):
     def __init__(self, db: Database):
         super().__init__()
         self.db = db
         self.attempts = 0
         self.setWindowTitle("Вход")
-        self.resize(320, 120)
+        self.resize(340, 140)
         v = QVBoxLayout()
         f1 = QHBoxLayout()
         f1.addWidget(QLabel("Имя:"))
@@ -139,7 +175,7 @@ class LoginDialog(QDialog):
         self.pass_edit = QLineEdit()
         self.pass_edit.setEchoMode(QLineEdit.Password)
         try:
-            self.pass_edit.setPasswordCharacter('*')
+            self.pass_edit.setPasswordCharacter("*")
         except Exception:
             pass
         f2.addWidget(self.pass_edit)
@@ -170,43 +206,65 @@ class LoginDialog(QDialog):
         if user.banned:
             QMessageBox.warning(self, "Заблокирован", "Учетная запись заблокирована.")
             return
-        if user.firstEntry:
+        if user.password_hash == "":
             ok = self.force_set_password(user)
-            if not ok:
+            if ok:
+                QMessageBox.information(self, "Готово", "Пароль установлен. Пожалуйста, выполните вход с новым паролем.")
+                self.pass_edit.clear()
+                return
+            else:
+                return
+        if not verify_password_hash(user.password_hash, user.salt, user.iterations, pwd):
+            self.attempts += 1
+            if self.attempts >= 3:
+                QMessageBox.critical(self, "Ошибка", "Три неверных попытки. Работа завершается.")
+                self.reject()
+                return
+            QMessageBox.warning(self, "Неверно", f"Неверный пароль. Попыток: {self.attempts}/3")
+            return
+        if user.force_change:
+            QMessageBox.information(
+                self,
+                "Внимание",
+                "В связи с изменением настроек безопасности для вашей учётной записи сейчас необходимо изменить пароль. После закрытия этого окна откроется форма для установки нового пароля.",
+            )
+            dlg = ChangePasswordDialog(self.db, user, require_old=True, preverified=True, parent=self)
+            if dlg.exec_() == QDialog.Accepted:
+                user.force_change = False
+                self.db.save()
+                self.user = user
+                self.accept()
+            else:
+                QMessageBox.information(self, "Требование", "Требуется смена пароля. Вход отменён.")
                 return
         else:
-            if not verify_password_hash(user.password_hash, user.salt, user.iterations, pwd):
-                self.attempts += 1
-                if self.attempts >= 3:
-                    QMessageBox.critical(self, "Ошибка", "Три неверных попытки. Работа завершается.")
-                    self.reject()
-                    return
-                QMessageBox.warning(self, "Неверно", f"Неверный пароль. Попыток: {self.attempts}/3")
-                return
-        self.user = user
-        self.accept()
+            self.user = user
+            self.accept()
 
     def force_set_password(self, user: User):
-        dlg = ChangePasswordDialog(self.db, user, require_old=False, parent=self)
+        dlg = ChangePasswordDialog(self.db, user, require_old=False, preverified=False, parent=self)
         res = dlg.exec_()
         return res == QDialog.Accepted
 
+
 class ChangePasswordDialog(QDialog):
-    def __init__(self, db: Database, user: User, require_old: bool = True, parent=None):
+    def __init__(self, db: Database, user: User, require_old: bool = True, preverified: bool = False, parent=None):
         super().__init__(parent)
         self.db = db
         self.user = user
         self.require_old = require_old
-        self.setWindowTitle(f"Смена пароля ({user.login})")
-        self.resize(360, 180)
+        self.preverified = preverified
+        title = f"Смена пароля ({user.login})"
+        self.setWindowTitle(title)
+        self.resize(380, 200)
         v = QVBoxLayout()
-        if require_old:
+        if require_old and not preverified:
             f_old = QHBoxLayout()
             f_old.addWidget(QLabel("Старый пароль:"))
             self.old = QLineEdit()
             self.old.setEchoMode(QLineEdit.Password)
             try:
-                self.old.setPasswordCharacter('*')
+                self.old.setPasswordCharacter("*")
             except Exception:
                 pass
             f_old.addWidget(self.old)
@@ -216,7 +274,7 @@ class ChangePasswordDialog(QDialog):
         self.new = QLineEdit()
         self.new.setEchoMode(QLineEdit.Password)
         try:
-            self.new.setPasswordCharacter('*')
+            self.new.setPasswordCharacter("*")
         except Exception:
             pass
         f_new.addWidget(self.new)
@@ -226,7 +284,7 @@ class ChangePasswordDialog(QDialog):
         self.conf = QLineEdit()
         self.conf.setEchoMode(QLineEdit.Password)
         try:
-            self.conf.setPasswordCharacter('*')
+            self.conf.setPasswordCharacter("*")
         except Exception:
             pass
         f_conf.addWidget(self.conf)
@@ -247,7 +305,7 @@ class ChangePasswordDialog(QDialog):
         self.setLayout(v)
         self.new.textChanged.connect(self._validate)
         self.conf.textChanged.connect(self._validate)
-        if require_old:
+        if require_old and not preverified:
             self.old.textChanged.connect(self._validate)
         self._validate()
 
@@ -264,8 +322,8 @@ class ChangePasswordDialog(QDialog):
             self.warn.setText("Ограничение: пароль не должен совпадать с именем в обратном порядке.")
             self.ok.setEnabled(False)
             return
-        if self.require_old and getattr(self, "old", None) is not None:
-            if not self.user.firstEntry and not verify_password_hash(self.user.password_hash, self.user.salt, self.user.iterations, self.old.text()):
+        if self.require_old and not self.preverified and getattr(self, "old", None) is not None:
+            if self.user.password_hash != "" and not verify_password_hash(self.user.password_hash, self.user.salt, self.user.iterations, self.old.text()):
                 self.warn.setText("Старый пароль введён неверно.")
                 self.ok.setEnabled(False)
                 return
@@ -273,8 +331,8 @@ class ChangePasswordDialog(QDialog):
         self.ok.setEnabled(True)
 
     def on_ok(self):
-        if self.require_old:
-            if not self.user.firstEntry and not verify_password_hash(self.user.password_hash, self.user.salt, self.user.iterations, self.old.text()):
+        if self.require_old and not self.preverified:
+            if self.user.password_hash != "" and not verify_password_hash(self.user.password_hash, self.user.salt, self.user.iterations, self.old.text()):
                 QMessageBox.warning(self, "Ошибка", "Старый пароль неверен.")
                 return
         a = self.new.text()
@@ -292,9 +350,10 @@ class ChangePasswordDialog(QDialog):
         self.user.password_hash = h
         self.user.salt = s
         self.user.iterations = it
-        self.user.firstEntry = False
+        self.user.force_change = False
         self.db.save()
         self.accept()
+
 
 class AddUserDialog(QDialog):
     def __init__(self, db: Database, parent=None):
@@ -332,19 +391,20 @@ class AddUserDialog(QDialog):
         self.db.add_user(n)
         self.accept()
 
+
 class AdminWindow(QMainWindow):
     def __init__(self, db: Database, admin_user: User):
         super().__init__()
         self.db = db
         self.admin_user = admin_user
         self.setWindowTitle("Администратор")
-        self.resize(640, 400)
+        self.resize(700, 420)
         central = QWidget()
         self.setCentralWidget(central)
         v = QVBoxLayout()
         central.setLayout(v)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Имя", "Заблок.", "Огран.", "Первый вход"])
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Имя", "Заблок.", "Огран."])
         self.table.setSelectionBehavior(self.table.SelectRows)
         v.addWidget(self.table)
         h = QHBoxLayout()
@@ -377,13 +437,16 @@ class AdminWindow(QMainWindow):
         self.reload_table()
 
     def reload_table(self):
-        rows = [asdict(self.db.admin)] + [asdict(u) for u in self.db.users]
+        rows = []
+        a = self.db.admin
+        rows.append({"login": a.login, "banned": a.banned, "restrict": a.restrict})
+        for u in self.db.users:
+            rows.append({"login": u.login, "banned": u.banned, "restrict": u.restrict})
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(r["login"]))
             self.table.setItem(i, 1, QTableWidgetItem("Да" if r["banned"] else "Нет"))
             self.table.setItem(i, 2, QTableWidgetItem("Да" if r["restrict"] else "Нет"))
-            self.table.setItem(i, 3, QTableWidgetItem("Да" if r["firstEntry"] else "Нет"))
 
     def add_user(self):
         dlg = AddUserDialog(self.db, self)
@@ -412,7 +475,10 @@ class AdminWindow(QMainWindow):
         if not name:
             return
         u = self.db.find_user(name)
-        u.restrict = not u.restrict
+        new = not u.restrict
+        u.restrict = new
+        if new and u.password_hash != "":
+            u.force_change = True
         self.db.save()
         self.reload_table()
 
@@ -423,8 +489,8 @@ class AdminWindow(QMainWindow):
         u = self.db.find_user(name)
         require_old = False
         if u.login.upper() == "ADMIN":
-            require_old = not u.firstEntry
-        dlg = ChangePasswordDialog(self.db, u, require_old=require_old, parent=self)
+            require_old = (u.password_hash != "")
+        dlg = ChangePasswordDialog(self.db, u, require_old=require_old, preverified=False, parent=self)
         dlg.exec_()
         self.reload_table()
 
@@ -432,13 +498,14 @@ class AdminWindow(QMainWindow):
         self.db.save()
         self.status.showMessage("База сохранена", 3000)
 
+
 class UserWindow(QMainWindow):
     def __init__(self, db: Database, user: User):
         super().__init__()
         self.db = db
         self.user = user
         self.setWindowTitle(f"Пользователь: {user.login}")
-        self.resize(400, 150)
+        self.resize(420, 160)
         central = QWidget()
         self.setCentralWidget(central)
         v = QVBoxLayout()
@@ -458,9 +525,10 @@ class UserWindow(QMainWindow):
         self.setStatusBar(self.status)
 
     def change_password(self):
-        dlg = ChangePasswordDialog(self.db, self.user, require_old=True, parent=self)
+        dlg = ChangePasswordDialog(self.db, self.user, require_old=True, preverified=False, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             self.status.showMessage("Пароль изменен", 3000)
+
 
 def main():
     app = QApplication(sys.argv)
@@ -475,6 +543,7 @@ def main():
         win = UserWindow(db, user)
     win.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
